@@ -2,7 +2,6 @@
 configs/
 sensor_data_logs/
 bin/
-notes/
 ./src/hello_ipmi.c
 ./src/ipmi_basic
 ./src/notex.txt
