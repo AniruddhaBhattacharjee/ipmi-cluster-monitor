@@ -1,0 +1,63 @@
+On Ubuntu 24.04/WSL:
+
+sudo apt update
+sudo apt install freeipmi libfreeipmi-dev libipmimonitoring-dev build-essential pkg-config
+
+Ubuntu 24.04 provides libipmimonitoring-dev separately from libfreeipmi-dev; it contains the headers and development files needed for the sensor-monitoring API.
+
+Verify:
+
+dpkg -l | grep -E 'freeipmi|ipmimonitoring'
+
+and:
+
+ls /usr/include/ipmi_monitoring*
+
+You should have at least:
+
+/usr/include/ipmi_monitoring.h
+/usr/include/ipmi_monitoring_bitmasks.h
+
+You can also verify the library:
+
+ldconfig -p | grep ipmimonitoring
+
+Before writing C code, make sure FreeIPMI itself can talk to the BMC:
+
+ipmi-sensors -h <BMC_IP> -u <USERNAME> -p <PASSWORD>
+>> Run ipmi-sensors command with '-D LAN_2_0' to force it to use IPMI 2.0 Version.
+If that works, your C program should be able to use essentially the same communication path.
+
+2. C program for periodic sensor sampling
+
+Create:
+
+mkdir freeipmi-sensors
+cd freeipmi-sensors
+nano sensor_monitor.c
+
+Compile directly with GCC:
+
+gcc -Wall -Wextra -O2 sensor_monitor.c -o sensor_monitor -lipmimonitoring
+
+FreeIPMI's own example uses essentially the same compilation form:
+
+gcc ... -lipmimonitoring
+
+Confirm linkage:
+
+ldd ./sensor_monitor | grep -i ipmi
+
+You should see something along the lines of:
+
+libipmimonitoring.so.6 => /lib/x86_64-linux-gnu/libipmimonitoring.so.6
+libfreeipmi.so.17      => /lib/x86_64-linux-gnu/libfreeipmi.so.17
+
+Then run it, for example with a 5-second sampling interval:
+
+./sensor_monitor 192.168.1.100 admin 'password' 5
+
+gcc -O2 -Wall -Wextra -pthread ipmi_cluster_monitor.c -o ipmi_cluster_monitor -lipmimonitoring -lfreeipmi
+gcc -O2 -std=c11 -Wall -Wextra -pthread ipmi_cluster_monitor_ring_tui.c -o ipmi_cluster_monitor_ring_tui -lipmimonitoring -lfreeipmi
+gcc -O2 -std=c11 -Wall -Wextra -pthread ipmi_cluster_monitor_tui.c -o ipmi_cluster_monitor_tui -lipmimonitoring -lfreeipmi
+gcc -O2 -std=c11 -Wall -Wextra -Wpedantic -pthread ipmi_cluster_monitor_ring_tui.c -o ipmi_cluster_monitor_ring_tui -lipmimonitoring -lfreeipmi
