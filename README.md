@@ -21,6 +21,12 @@ ls /usr/include/ipmi_monitoring*
 ldconfig -p | grep ipmimonitoring
 </pre>
 
+## Directory Setup
+### Create directorie to store executable-
+<pre>
+mkdir bin
+</pre>
+
 ## Compiling C Code
 ### To compile code C project, run:
 <pre>
