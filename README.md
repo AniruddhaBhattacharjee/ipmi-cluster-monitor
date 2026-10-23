@@ -32,7 +32,7 @@ mkdir bin
 <pre>
 gcc -O2 -std=c11 -Wall -Wextra -pthread src/ipmi_ringbuf_clustermon.c -o bin/ipmi_ringbuf_clustermon -lipmimonitoring -lfreeipmi
 </pre>
-#### The executable will be inside the bin/ directory.
+#### The executable will be inside the bin/ directory. Any other compiler optimization level can also be used (important for low-power systems).
 
 ### After compiling with gcc, confirm linkage with:
 <pre>
