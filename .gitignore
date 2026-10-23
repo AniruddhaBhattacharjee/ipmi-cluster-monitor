@@ -2,5 +2,5 @@
 configs/
 sensor_data_logs/
 bin/
-/src/ipmi_ringbuf_clustermon_tuix.c
-/tui/ipmi_tui_2.py
+src/ipmi_ringbuf_clustermon_tuix.c
+tui/ipmi_tui_2.py
