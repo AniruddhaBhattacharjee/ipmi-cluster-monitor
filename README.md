@@ -53,6 +53,11 @@ sudo ./bin/output_executable_name /path/to/bmc/config/file sampling-interval
 ## Starting the Terminal User Interface (TUI) for IPMI Data Visualization
 ### Open a separate terminal, and run the Python script in tui/ directory- 
 <pre>
-python3 tui/ipmi_tui.py
+python3 tui/ipmi_tui_main.py
 </pre>
-### The TUI shoudl display information cards for each Server BMC specified in the BMC config file and update available sensor data in the window. To display only specfic sensor information, different tabs are provided to switch between sensor types. 
+### The TUI shoudl display information cards for each Server BMC specified in the BMC config file and update available sensor data in the window. To display only specfic sensor information, different tabs are provided to switch between sensor types.
+
+### The _ipmi_tui_basic.py_ script, functions the same way, but offers a more minimal interface, without tabs or buttons, simply grouping all sensors based on their type and displaying all of them for each BMC. Run it the same way-
+<pre>
+python3 tui/ipmi_tui_basic.py
+</pre>
