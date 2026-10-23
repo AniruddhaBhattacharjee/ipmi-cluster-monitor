@@ -28,9 +28,9 @@ mkdir bin
 </pre>
 
 ## Compiling C Code
-### To compile code C project, run:
+### To compile code C project, run from Project Root:
 <pre>
-gcc -O2 -std=c11 -Wall -Wextra -pthread src/ipmi_ringbuf_clustermon_tuix.c -o bin/ipmi_ringbuf_clustermon_tuix -lipmimonitoring -lfreeipmi
+gcc -O2 -std=c11 -Wall -Wextra -pthread src/ipmi_ringbuf_clustermon.c -o bin/ipmi_ringbuf_clustermon -lipmimonitoring -lfreeipmi
 </pre>
 #### The executable will be inside the bin/ directory.
 
@@ -53,6 +53,6 @@ sudo ./bin/output_executable_name /path/to/bmc/config/file sampling-interval
 ## Starting the Terminal User Interface (TUI) for IPMI Data Visualization
 ### Open a separate terminal, and run the Python script in tui/ directory- 
 <pre>
-python3 tui/ipmi_tui_2.py
+python3 tui/ipmi_tui.py
 </pre>
 ### The TUI shoudl display information cards for each Server BMC specified in the BMC config file and update available sensor data in the window. To display only specfic sensor information, different tabs are provided to switch between sensor types. 

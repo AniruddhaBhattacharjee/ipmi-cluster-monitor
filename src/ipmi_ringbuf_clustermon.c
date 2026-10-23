@@ -12,12 +12,17 @@
 #include <pthread.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/time.h>
+#include <poll.h>
 #include <limits.h>
 
 #include <ipmi_monitoring.h>
 
 #define LOG_DIR "sensor_data_logs"
 #define LOG_BUFFER_SIZE (1024 * 1024)
+#define IPC_SOCKET_PATH "/tmp/ipmi_cluster_monitor.sock"
 #define SAMPLE_RING_CAPACITY 4096
 
 typedef struct {
@@ -63,12 +68,12 @@ typedef struct {
     int sampler_started;
     int logger_started;
 
-    /* Latest live state; intended to become the source for the future TUI/IPC layer. */
+    // latest live state; intended to become the source for the future TUI/IPC layer, if I can :().
     pthread_mutex_t sensor_mutex;
     struct timespec sample_timestamp;
     unsigned long long sample_generation;
 
-    /* Historical producer-consumer path used by the logger. */
+    // historical producer-consumer path used by the logger.
     sample_ring ring;
 
     FILE *log_fp;
@@ -76,7 +81,152 @@ typedef struct {
     char log_path[PATH_MAX];
 } bmc_runtime;
 
+
 static volatile sig_atomic_t g_stop = 0;
+static const char *unit_string(int unit);
+
+static enum ipmi_monitoring_sensor_units selected_units[] = {
+    IPMI_MONITORING_SENSOR_UNITS_CELSIUS,
+    IPMI_MONITORING_SENSOR_UNITS_FAHRENHEIT,
+    IPMI_MONITORING_SENSOR_UNITS_VOLTS,
+    IPMI_MONITORING_SENSOR_UNITS_AMPS,
+    IPMI_MONITORING_SENSOR_UNITS_WATTS,
+    IPMI_MONITORING_SENSOR_UNITS_RPM,
+    IPMI_MONITORING_SENSOR_UNITS_PERCENT
+};
+static int selected_unit_count = (int)(sizeof(selected_units) / sizeof(selected_units[0]));
+
+typedef struct {
+    bmc_runtime *bmcs;
+    int bmc_count;
+} ipc_server_args;
+
+static void json_write_string(FILE *fp,const char *s) {
+    fputc('"',fp);
+    if (s) for (const unsigned char *p=(const unsigned char *)s;*p;p++) {
+        switch (*p) {
+            case '"': fputs("\\\"",fp); break;
+            case '\\': fputs("\\\\",fp); break;
+            case '\b': fputs("\\b",fp); break;
+            case '\f': fputs("\\f",fp); break;
+            case '\n': fputs("\n",fp); break;
+            case '\r': fputs("\\r",fp); break;
+            case '\t': fputs("\\t",fp); break;
+            default: 
+                    if (*p < 0x20) {
+                        fprintf(fp,"\\u%04x",*p); 
+                    } else { 
+                        fputc(*p,fp);
+                    }
+        }
+    }
+    fputc('"',fp);
+}
+
+static int ipc_write_snapshot(FILE *fp,bmc_runtime *bmcs,int bmc_count) {
+    fputs("{\"bmcs\":[",fp);
+    int written=0;
+    for (int i=0;i<bmc_count;i++) {
+        bmc_runtime *b=&bmcs[i];
+        if (!b->sensors || b->sensor_count<=0) continue;
+        double *values=malloc((size_t)b->sensor_count*sizeof(*values));
+        int *states=malloc((size_t)b->sensor_count*sizeof(*states));
+        
+        if (!values || !states){ 
+            free(values); 
+            free(states); 
+            return -1; 
+        }
+        
+        struct timespec ts; unsigned long long generation;
+        pthread_mutex_lock(&b->sensor_mutex);
+        
+        ts=b->sample_timestamp; generation=(unsigned long long)b->sample_generation;
+        
+        for (int j=0;j<b->sensor_count;j++) { 
+            values[j]=b->sensors[j].reading; 
+            states[j]=b->sensors[j].sensor_state; 
+        }
+        pthread_mutex_unlock(&b->sensor_mutex);
+        
+        if (written++) fputc(',',fp);
+        fputs("{\"host\":",fp); json_write_string(fp,b->hostname);
+        fprintf(fp,",\"timestamp\":%lld.%09ld,\"generation\":%llu,\"logging\":%s,\"sensors\":[",(long long)ts.tv_sec,ts.tv_nsec,generation,b->logging_enabled?"true":"false");
+        for (int j=0;j<b->sensor_count;j++) {
+            if (j) fputc(',',fp);
+            fputs("{\"name\":",fp); json_write_string(fp,b->sensors[j].name);
+            fprintf(fp,",\"value\":%.9g,\"unit\":",values[j]); json_write_string(fp,unit_string(b->sensors[j].sensor_units));
+            fprintf(fp,",\"state\":%d}",states[j]);
+        }
+        fputs("]}",fp); free(values); free(states);
+    }
+    fputs("]}\n",fp); return ferror(fp)?-1:0;
+}
+
+static void *ipc_server_thread_main(void *arg) {
+    ipc_server_args *a=arg;
+    int server_fd=socket(AF_UNIX,SOCK_STREAM,0);
+    if (server_fd<0){ 
+        fprintf(stderr,"[IPC-!] socket failed: %s\n",strerror(errno)); 
+        return NULL; 
+    }
+    unlink(IPC_SOCKET_PATH);
+    
+    struct sockaddr_un addr; 
+    memset(&addr,0,sizeof(addr)); addr.sun_family=AF_UNIX; 
+    snprintf(addr.sun_path,sizeof(addr.sun_path),"%s",IPC_SOCKET_PATH);
+    
+    if (bind(server_fd,(struct sockaddr *)&addr,sizeof(addr))<0) { 
+        fprintf(stderr,"[IPC] bind %s failed: %s\n",IPC_SOCKET_PATH,strerror(errno)); 
+        close(server_fd); return NULL; 
+    }
+    if (chmod(IPC_SOCKET_PATH,0666)<0) {
+        fprintf(stderr,"[IPC] warning: chmod failed: %s\n",strerror(errno));
+    }
+    if (listen(server_fd,8)<0) { 
+        fprintf(stderr,"[IPC] listen failed: %s\n",strerror(errno)); 
+        close(server_fd); 
+        unlink(IPC_SOCKET_PATH); 
+        return NULL; 
+    }
+    //printf("MONITOR-READY");
+    printf("[IPC] TUI socket ready: %s\n", IPC_SOCKET_PATH);
+    //printf("MONITOR-READY");
+    
+    struct pollfd pfd={.fd=server_fd, .events=POLLIN};
+    
+    while (!g_stop) {
+        int pr=poll(&pfd,1,500);
+        if (pr < 0) { 
+            if (errno==EINTR) continue; 
+            break; 
+        }
+        if (pr == 0 || !(pfd.revents&POLLIN)) continue;
+        int client_fd = accept(server_fd,NULL,NULL);
+        
+        if (client_fd<0) { 
+            if (errno==EINTR) continue; 
+            continue; 
+        }
+        struct timeval tv={.tv_sec=1,.tv_usec=0}; setsockopt(client_fd,SOL_SOCKET,SO_SNDTIMEO,&tv,sizeof(tv));
+        char req[16]={0}; 
+        ssize_t n = recv(client_fd,req,sizeof(req)-1,0);
+        
+        if (n>0 && !strncmp(req,"GET",3)) {
+            FILE *fp=fdopen(client_fd,"w");
+            if (fp) { 
+                ipc_write_snapshot(fp,a->bmcs,a->bmc_count); 
+                fclose(fp); client_fd=-1; 
+            }
+        }
+        if (client_fd>=0) { 
+            close(client_fd);
+        }
+    }
+    close(server_fd); 
+    unlink(IPC_SOCKET_PATH); 
+    return NULL;
+}
 
 static void signal_handler(int sig) {
     (void)sig;
@@ -92,7 +242,8 @@ static const char *unit_string(int unit) {
         case IPMI_MONITORING_SENSOR_UNITS_WATTS: return "W";
         case IPMI_MONITORING_SENSOR_UNITS_RPM: return "RPM";
         case IPMI_MONITORING_SENSOR_UNITS_PERCENT: return "%";
-        default: return "";
+        default: 
+            return "";
     }
 }
 
@@ -103,6 +254,78 @@ static char *trim(char *s) {
     end = s + strlen(s) - 1;
     while (end > s && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) *end-- = '\0';
     return s;
+}
+
+static int parse_sensor_units(const char *arg) {
+    static const struct {
+        const char *name;
+        enum ipmi_monitoring_sensor_units unit;
+    } unit_names[] = {
+        {"celsius", IPMI_MONITORING_SENSOR_UNITS_CELSIUS},
+        {"celcius", IPMI_MONITORING_SENSOR_UNITS_CELSIUS},
+        {"c", IPMI_MONITORING_SENSOR_UNITS_CELSIUS},
+        {"fahrenheit", IPMI_MONITORING_SENSOR_UNITS_FAHRENHEIT},
+        {"f", IPMI_MONITORING_SENSOR_UNITS_FAHRENHEIT},
+        {"volts", IPMI_MONITORING_SENSOR_UNITS_VOLTS},
+        {"volt", IPMI_MONITORING_SENSOR_UNITS_VOLTS},
+        {"v", IPMI_MONITORING_SENSOR_UNITS_VOLTS},
+        {"amps", IPMI_MONITORING_SENSOR_UNITS_AMPS},
+        {"amp", IPMI_MONITORING_SENSOR_UNITS_AMPS},
+        {"amperes", IPMI_MONITORING_SENSOR_UNITS_AMPS},
+        {"a", IPMI_MONITORING_SENSOR_UNITS_AMPS},
+        {"watts", IPMI_MONITORING_SENSOR_UNITS_WATTS},
+        {"watt", IPMI_MONITORING_SENSOR_UNITS_WATTS},
+        {"w", IPMI_MONITORING_SENSOR_UNITS_WATTS},
+        {"rpm", IPMI_MONITORING_SENSOR_UNITS_RPM},
+        {"percent", IPMI_MONITORING_SENSOR_UNITS_PERCENT},
+        {"percentage", IPMI_MONITORING_SENSOR_UNITS_PERCENT},
+        {"%", IPMI_MONITORING_SENSOR_UNITS_PERCENT}
+    };
+    
+    if (!arg || !*arg) return -1;
+    
+    char *copy = strdup(arg);
+    if (!copy) return -1;
+    selected_unit_count = 0;
+    
+    char *save = NULL;
+    for (char *token = strtok_r(copy, ",", &save); token; token = strtok_r(NULL, ",", &save)) {
+        token = trim(token);
+        if (!*token) {
+            fprintf(stderr, "[!] Empty sensor unit in --units list\n");
+            free(copy);
+            return -1;
+        }
+        int found = 0;
+        for (size_t i = 0; i < sizeof(unit_names) / sizeof(unit_names[0]); i++) {
+            if (!strcasecmp(token, unit_names[i].name)) {
+                int duplicate = 0;
+                for (int j = 0; j < selected_unit_count; j++)
+                    if (selected_units[j] == unit_names[i].unit) duplicate = 1;
+                if (!duplicate) {
+                    if (selected_unit_count >= (int)(sizeof(selected_units) / sizeof(selected_units[0]))) {
+                        free(copy);
+                        return -1;
+                    }
+                    selected_units[selected_unit_count++] = unit_names[i].unit;
+                }
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            fprintf(stderr, "[!] Unknown sensor unit '%s' in --units list\n", token);
+            fprintf(stderr, "    Supported: celsius, fahrenheit, volts, amps, watts, rpm, percent\n");
+            free(copy);
+            return -1;
+        }
+    }
+    free(copy);
+    if (selected_unit_count == 0) {
+        fprintf(stderr, "[!] --units must contain at least one supported unit\n");
+        return -1;
+    }
+    return 0;
 }
 
 static int is_log_token(const char *s) {
@@ -122,10 +345,13 @@ static void sanitize_filename(const char *src, char *dst, size_t dst_size) {
 
 static void sleep_seconds(double seconds) {
     struct timespec req, rem;
-    if (seconds <= 0.0) return;
+    if (seconds <= 0.0) 
+        return;
     req.tv_sec = (time_t)seconds;
     req.tv_nsec = (long)((seconds - (double)req.tv_sec) * 1000000000.0);
-    while (!g_stop && nanosleep(&req, &rem) < 0 && errno == EINTR) req = rem;
+    
+    while (!g_stop && nanosleep(&req, &rem) < 0 && errno == EINTR) 
+        req = rem;
 }
 
 static void free_sensor_list(spec_list *list, int count) {
@@ -134,12 +360,9 @@ static void free_sensor_list(spec_list *list, int count) {
     free(list);
 }
 
-static spec_list *get_specific_sensors(ipmi_monitoring_ctx_t ctx,
-                                       const char *hostname,
-                                       struct ipmi_monitoring_ipmi_config *config,
-                                       const enum ipmi_monitoring_sensor_units *target_units,
-                                       int num_units,
-                                       int *out_count) {
+static spec_list *get_specific_sensors(ipmi_monitoring_ctx_t ctx, const char *hostname, struct ipmi_monitoring_ipmi_config *config, 
+                                        const enum ipmi_monitoring_sensor_units *target_units, 
+                                        int num_units, int *out_count) {
     unsigned int flags = IPMI_MONITORING_SENSOR_READING_FLAGS_DISCRETE_READING;
     int sensor_count = ipmi_monitoring_sensor_readings_by_record_id(ctx, hostname, config, flags, NULL, 0, NULL, NULL);
     if (out_count) *out_count = 0;
@@ -194,7 +417,9 @@ static spec_list *get_specific_sensors(ipmi_monitoring_ctx_t ctx,
             selected_count++;
         }
 
-        if (i < sensor_count - 1) ipmi_monitoring_sensor_iterator_next(ctx);
+        if (i < sensor_count - 1) {
+            ipmi_monitoring_sensor_iterator_next(ctx);
+        }
     }
 
     if (out_count) *out_count = selected_count;
@@ -268,7 +493,7 @@ static void sample_ring_push(sample_ring *ring, const struct timespec *ts, const
     pthread_mutex_unlock(&ring->mutex);
 }
 
-/* Returns 1 for a sample, 0 when shutdown is complete. */
+// Returns 1 for a sample, 0 when shutdown is complete
 static int sample_ring_pop(sample_ring *ring, struct timespec *ts, double *readings) {
     pthread_mutex_lock(&ring->mutex);
     while (ring->count == 0 && !g_stop)
@@ -365,10 +590,8 @@ static void *logger_thread_main(void *arg) {
     struct timespec ts;
     while (sample_ring_pop(&bmc->ring, &ts, snapshot)) {
         fprintf(bmc->log_fp, "%lld.%09ld", (long long)ts.tv_sec, ts.tv_nsec);
-        for (int i = 0; i < bmc->sensor_count; i++) {
-            fprintf(bmc->log_fp, ",%s:%.6f:%s",
-                    bmc->sensors[i].name, snapshot[i],
-                    unit_string(bmc->sensors[i].sensor_units));
+        for (int i = 0; i < bmc->sensor_count; i++){
+            fprintf(bmc->log_fp, ",%s:%.6f:%s", bmc->sensors[i].name, snapshot[i], unit_string(bmc->sensors[i].sensor_units));
         }
         fputc('\n', bmc->log_fp);
     }
@@ -400,27 +623,16 @@ static int configure_bmc(bmc_runtime *bmc) {
     bmc->config.password = bmc->password;
     bmc->config.k_g = NULL;
     bmc->config.k_g_len = 0;
-    bmc->config.privilege_level = IPMI_MONITORING_PRIVILEGE_LEVEL_ADMIN;
+    bmc->config.privilege_level = IPMI_MONITORING_PRIVILEGE_LEVEL_ADMIN;  // send pwd
     bmc->config.authentication_type = -1;
     bmc->config.cipher_suite_id = 3;
     bmc->config.session_timeout_len = 0;
     bmc->config.retransmission_timeout_len = 0;
     bmc->config.workaround_flags = 0;
 
-    enum ipmi_monitoring_sensor_units target_units[] = {
-        //IPMI_MONITORING_SENSOR_UNITS_CELSIUS,
-        //IPMI_MONITORING_SENSOR_UNITS_FAHRENHEIT,
-        IPMI_MONITORING_SENSOR_UNITS_VOLTS,
-        IPMI_MONITORING_SENSOR_UNITS_AMPS,
-        IPMI_MONITORING_SENSOR_UNITS_WATTS,
-        //IPMI_MONITORING_SENSOR_UNITS_RPM,
-        //IPMI_MONITORING_SENSOR_UNITS_PERCENT
-    };
-
     bmc->sensors = get_specific_sensors(
         bmc->ctx, bmc->hostname, &bmc->config,
-        target_units, (int)(sizeof(target_units) / sizeof(target_units[0])),
-        &bmc->sensor_count);
+        selected_units, selected_unit_count, &bmc->sensor_count);
 
     if (!bmc->sensors || bmc->sensor_count <= 0) {
         fprintf(stderr, "[%s] No selected sensors discovered\n", bmc->hostname);
@@ -467,13 +679,14 @@ static int open_bmc_log(bmc_runtime *bmc) {
         return -1;
     }
 
-    /* Large stdio buffer reduces write()/filesystem overhead during frequent logging. */
     bmc->log_buffer = malloc(LOG_BUFFER_SIZE);
     if (bmc->log_buffer) setvbuf(bmc->log_fp, bmc->log_buffer, _IOFBF, LOG_BUFFER_SIZE);
     return 0;
 }
 
-static int append_bmc(bmc_runtime **bmcs, int *count, int *capacity, const char *host, const char *user, const char *pass, int logging_enabled, double interval) {
+static int append_bmc(bmc_runtime **bmcs, int *count, int *capacity,
+                      const char *host, const char *user, const char *pass,
+                      int logging_enabled, double interval) {
     if (*count == *capacity) {
         int new_capacity = (*capacity == 0) ? 4 : (*capacity * 2);
         bmc_runtime *tmp = realloc(*bmcs, (size_t)new_capacity * sizeof(**bmcs));
@@ -498,7 +711,7 @@ static int append_bmc(bmc_runtime **bmcs, int *count, int *capacity, const char 
 static int load_bmc_file(const char *path, bmc_runtime **out_bmcs, int *out_count, double interval) {
     FILE *fp = fopen(path, "r");
     if (!fp) {
-        fprintf(stderr, "Cannot open BMC file %s: %s\n", path, strerror(errno));
+        fprintf(stderr, "[!] Cannot open BMC file %s: %s\n", path, strerror(errno));
         return -1;
     }
 
@@ -522,13 +735,13 @@ static int load_bmc_file(const char *path, bmc_runtime **out_bmcs, int *out_coun
         char *opt = strtok_r(NULL, ",", &save);
 
         if (!host || !user || !pass) {
-            fprintf(stderr, "Ignoring malformed line %d in %s\n", line_no, path);
+            fprintf(stderr, "[!] Ignoring malformed line %d in %s\n", line_no, path);
             continue;
         }
 
         host = trim(host); user = trim(user); pass = trim(pass); if (opt) opt = trim(opt);
         if (append_bmc(&bmcs, &count, &capacity, host, user, pass, is_log_token(opt), interval) < 0) {
-            fprintf(stderr, "Failed to store BMC entry from line %d\n", line_no);
+            fprintf(stderr, "[!] Failed to store BMC entry from line %d\n", line_no);
             free(line);
             fclose(fp);
             return -1;
@@ -543,6 +756,7 @@ static int load_bmc_file(const char *path, bmc_runtime **out_bmcs, int *out_coun
 }
 
 static void cleanup_bmc(bmc_runtime *bmc) {
+    // Freedooommmmmmm !
     if (bmc->log_fp) fclose(bmc->log_fp);
     free(bmc->log_buffer);
     free(bmc->record_ids);
@@ -559,37 +773,46 @@ static void cleanup_bmc(bmc_runtime *bmc) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 3) {
-        fprintf(stderr, "Usage: %s <BMC_FILE> <INTERVAL_SECONDS>\n", argv[0]);
+    if (argc != 3 && argc != 5) {
+        fprintf(stderr, "Usage: %s <BMC_FILE> <INTERVAL_SECONDS> [--units UNIT[,UNIT...]]\n", argv[0]);
         fprintf(stderr, "BMC file format: IP,USERNAME,PASSWORD[,log]\n");
+        fprintf(stderr, "Units: celsius, fahrenheit, volts, amps, watts, rpm, percent (default: all)\n");
         return EXIT_FAILURE;
+    }
+    if (argc == 5) {
+        if (strcmp(argv[3], "--units") != 0) {
+            fprintf(stderr, "[!] Expected --units before the unit list\n");
+            return EXIT_FAILURE;
+        }
+        if (parse_sensor_units(argv[4]) < 0) return EXIT_FAILURE;
     }
 
     char *end = NULL;
     double interval = strtod(argv[2], &end);
     if (!end || *end != '\0' || interval <= 0.0) {
-        fprintf(stderr, "Sampling interval must be a number > 0 seconds\n");
+        fprintf(stderr, "[!] Sampling interval must be a number > 0 seconds\n");
         return EXIT_FAILURE;
     }
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
+    signal(SIGPIPE, SIG_IGN);
 
     int errnum;
     if (ipmi_monitoring_init(0, &errnum) < 0) {
-        fprintf(stderr, "ipmi_monitoring_init failed: %s\n", ipmi_monitoring_ctx_strerror(errnum));
+        fprintf(stderr, "[!] ipmi_monitoring_init failed: %s\n", ipmi_monitoring_ctx_strerror(errnum));
         return EXIT_FAILURE;
     }
 
     bmc_runtime *bmcs = NULL;
     int bmc_count = 0;
     if (load_bmc_file(argv[1], &bmcs, &bmc_count, interval) < 0) {
-        fprintf(stderr, "No valid BMC entries loaded\n");
+        fprintf(stderr, "[!] No valid BMC entries loaded\n");
         return EXIT_FAILURE;
     }
 
     if (mkdir(LOG_DIR, 0755) < 0 && errno != EEXIST) {
-        fprintf(stderr, "Cannot create %s: %s\n", LOG_DIR, strerror(errno));
+        fprintf(stderr, "[!] Cannot create %s: %s\n", LOG_DIR, strerror(errno));
         return EXIT_FAILURE;
     }
 
@@ -607,9 +830,10 @@ int main(int argc, char **argv) {
         if (b->logging_enabled) {
             if (clear_bmc_log(b) == 0){
                 printf("[%s] Cleared log file <%s>\n", b->hostname, b->log_path);
-            } else{
+            } else {
                 fprintf(stderr, "[%s-!] Failed to Clear log file <%s>!\n", b->hostname, b->log_path);
             }
+            
             if (open_bmc_log(b) == 0 && pthread_create(&b->logger_thread, NULL, logger_thread_main, b) == 0) {
                 b->logger_started = 1;
                 printf("[%s] Logging to %s\n", b->hostname, b->log_path);
@@ -626,8 +850,15 @@ int main(int argc, char **argv) {
         }
     }
 
+    pthread_t ipc_thread; int ipc_started=0; ipc_server_args ipc_args={.bmcs=bmcs,.bmc_count=bmc_count};
+    if (active>0 && pthread_create(&ipc_thread,NULL,ipc_server_thread_main,&ipc_args)==0) {
+        ipc_started=1; 
+    } else if (active>0) {
+        fprintf(stderr,"[IPC] Failed to start socket server thread\n");
+    }
+
     if (active == 0) {
-        fprintf(stderr, "No BMC sampler threads started\n");
+        fprintf(stderr, "[!] No BMC sampler threads started\n");
         g_stop = 1;
     }
 
@@ -646,6 +877,8 @@ int main(int argc, char **argv) {
         if (bmcs[i].logger_started) pthread_join(bmcs[i].logger_thread, NULL);
     }
 
+    if (ipc_started) pthread_join(ipc_thread,NULL);
+
     for (int i = 0; i < bmc_count; i++) {
         if (bmcs[i].ring.initialized) {
             unsigned long long overruns = sample_ring_overruns(&bmcs[i].ring);
@@ -655,7 +888,10 @@ int main(int argc, char **argv) {
         }
     }
 
-    for (int i = 0; i < bmc_count; i++) cleanup_bmc(&bmcs[i]);
+    for (int i = 0; i < bmc_count; i++) {
+        cleanup_bmc(&bmcs[i]);
+    }
+
     free(bmcs);
     printf("[*] Telemetry Complete.\n");
     return EXIT_SUCCESS;

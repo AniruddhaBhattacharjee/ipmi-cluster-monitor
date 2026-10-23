@@ -178,9 +178,11 @@ static void *ipc_server_thread_main(void *arg) {
         unlink(IPC_SOCKET_PATH); 
         return NULL; 
     }
+    //printf("MONITOR-READY");
     printf("[IPC] TUI socket ready: %s\n", IPC_SOCKET_PATH);
+    //printf("MONITOR-READY");
     
-    struct pollfd pfd={.fd=server_fd,.events=POLLIN};
+    struct pollfd pfd={.fd=server_fd, .events=POLLIN};
     
     while (!g_stop) {
         int pr=poll(&pfd,1,500);
@@ -229,7 +231,8 @@ static const char *unit_string(int unit) {
         case IPMI_MONITORING_SENSOR_UNITS_WATTS: return "W";
         case IPMI_MONITORING_SENSOR_UNITS_RPM: return "RPM";
         case IPMI_MONITORING_SENSOR_UNITS_PERCENT: return "%";
-        default: return "";
+        default: 
+            return "";
     }
 }
 
@@ -537,7 +540,7 @@ static int configure_bmc(bmc_runtime *bmc) {
     bmc->config.password = bmc->password;
     bmc->config.k_g = NULL;
     bmc->config.k_g_len = 0;
-    bmc->config.privilege_level = IPMI_MONITORING_PRIVILEGE_LEVEL_ADMIN;
+    bmc->config.privilege_level = IPMI_MONITORING_PRIVILEGE_LEVEL_ADMIN;  // send pwd
     bmc->config.authentication_type = -1;
     bmc->config.cipher_suite_id = 3;
     bmc->config.session_timeout_len = 0;
@@ -604,7 +607,6 @@ static int open_bmc_log(bmc_runtime *bmc) {
         return -1;
     }
 
-    // large stdio buffer reduces write()/filesystem overhead during frequent logging.
     bmc->log_buffer = malloc(LOG_BUFFER_SIZE);
     if (bmc->log_buffer) setvbuf(bmc->log_fp, bmc->log_buffer, _IOFBF, LOG_BUFFER_SIZE);
     return 0;
@@ -637,7 +639,7 @@ static int append_bmc(bmc_runtime **bmcs, int *count, int *capacity,
 static int load_bmc_file(const char *path, bmc_runtime **out_bmcs, int *out_count, double interval) {
     FILE *fp = fopen(path, "r");
     if (!fp) {
-        fprintf(stderr, "Cannot open BMC file %s: %s\n", path, strerror(errno));
+        fprintf(stderr, "[!] Cannot open BMC file %s: %s\n", path, strerror(errno));
         return -1;
     }
 
@@ -661,13 +663,13 @@ static int load_bmc_file(const char *path, bmc_runtime **out_bmcs, int *out_coun
         char *opt = strtok_r(NULL, ",", &save);
 
         if (!host || !user || !pass) {
-            fprintf(stderr, "Ignoring malformed line %d in %s\n", line_no, path);
+            fprintf(stderr, "[!] Ignoring malformed line %d in %s\n", line_no, path);
             continue;
         }
 
         host = trim(host); user = trim(user); pass = trim(pass); if (opt) opt = trim(opt);
         if (append_bmc(&bmcs, &count, &capacity, host, user, pass, is_log_token(opt), interval) < 0) {
-            fprintf(stderr, "Failed to store BMC entry from line %d\n", line_no);
+            fprintf(stderr, "[!] Failed to store BMC entry from line %d\n", line_no);
             free(line);
             fclose(fp);
             return -1;
@@ -708,7 +710,7 @@ int main(int argc, char **argv) {
     char *end = NULL;
     double interval = strtod(argv[2], &end);
     if (!end || *end != '\0' || interval <= 0.0) {
-        fprintf(stderr, "Sampling interval must be a number > 0 seconds\n");
+        fprintf(stderr, "[!] Sampling interval must be a number > 0 seconds\n");
         return EXIT_FAILURE;
     }
 
@@ -769,10 +771,14 @@ int main(int argc, char **argv) {
     }
 
     pthread_t ipc_thread; int ipc_started=0; ipc_server_args ipc_args={.bmcs=bmcs,.bmc_count=bmc_count};
-    if (active>0 && pthread_create(&ipc_thread,NULL,ipc_server_thread_main,&ipc_args)==0) ipc_started=1; else if (active>0) fprintf(stderr,"[IPC] Failed to start socket server thread\n");
+    if (active>0 && pthread_create(&ipc_thread,NULL,ipc_server_thread_main,&ipc_args)==0) {
+        ipc_started=1; 
+    } else if (active>0) {
+        fprintf(stderr,"[IPC] Failed to start socket server thread\n");
+    }
 
     if (active == 0) {
-        fprintf(stderr, "No BMC sampler threads started\n");
+        fprintf(stderr, "[!] No BMC sampler threads started\n");
         g_stop = 1;
     }
 
