@@ -468,10 +468,6 @@ static void sample_ring_destroy(sample_ring *ring) {
     memset(ring, 0, sizeof(*ring));
 }
 
-/*
- * Non-blocking producer. If the logger cannot keep up and the ring is full,
- * discard the oldest queued sample rather than delaying acquisition.
- */
 static void sample_ring_push(sample_ring *ring, const struct timespec *ts, const spec_list *sensors) {
     pthread_mutex_lock(&ring->mutex);
 

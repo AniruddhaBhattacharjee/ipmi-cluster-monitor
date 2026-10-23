@@ -164,7 +164,7 @@ class IPMI_Cluster_Monitor(App):
                 await row.mount(box)
         await asyncio.sleep(0)
         servers.scroll_y=old_scroll
-
+# trigger point
     async def refresh_data(self):
         if self.refresh_lock.locked(): return
         async with self.refresh_lock:
