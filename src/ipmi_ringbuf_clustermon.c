@@ -68,12 +68,10 @@ typedef struct {
     int sampler_started;
     int logger_started;
 
-    // latest live state; intended to become the source for the future TUI/IPC layer, if I can :().
     pthread_mutex_t sensor_mutex;
     struct timespec sample_timestamp;
     unsigned long long sample_generation;
 
-    // historical producer-consumer path used by the logger.
     sample_ring ring;
 
     FILE *log_fp;
