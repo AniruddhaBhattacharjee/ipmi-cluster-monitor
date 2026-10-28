@@ -50,19 +50,23 @@ libfreeipmi.so.y      => /lib/x86_64-linux-gnu/libfreeipmi.so.y
 </pre>
 ### Have a bmc config file which has the following format-
 <pre>
+./bin/output_executable_name /path/to/bmc/config/file sampling-interval
+</pre>
+### Have a bmc config file which has the following format-
+<pre>
 # BMC_IP, USERNAME, PASSWORD[,log]
 a.b.c.d,username,password,log
 e.f.g.h,username2,password2
 </pre>
-### Rows starting with '#' will be skipped. Mention 'log' to log captured sensor data to a CSV file. Logs will be saved to a directory named 'sensor_data_logs' in the project root.
+#### Rows starting with '#' will be skipped. Mention 'log' to log captured sensor data to a CSV file. Logs will be saved to a directory named 'sensor_data_logs' in the project root.
 ## Starting the Terminal User Interface (TUI) for IPMI Data Visualization
 ### Open a separate terminal, and run the Python script in tui/ directory- 
 <pre>
 python3 tui/ipmi_tui_main.py
 </pre>
-### The TUI shoudl display information cards for each Server BMC specified in the BMC config file and update available sensor data in the window. To display only specfic sensor information, different tabs are provided to switch between sensor types.
+#### The TUI shoudl display information cards for each Server BMC specified in the BMC config file and update available sensor data in the window. To display only specfic sensor information, different tabs are provided to switch between sensor types.
 
-### The _ipmi_tui_basic.py_ script, functions the same way, but offers a more minimal interface, without tabs or buttons, simply grouping all sensors based on their type and displaying all of them for each BMC. Run it the same way-
+#### The _ipmi_tui_basic.py_ script, functions the same way, but offers a more minimal interface, without tabs or buttons, simply grouping all sensors based on their type and displaying all of them for each BMC. Run it the same way-
 <pre>
 python3 tui/ipmi_tui_basic.py
 </pre>

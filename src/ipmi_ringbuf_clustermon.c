@@ -20,7 +20,7 @@
 
 #include <ipmi_monitoring.h>
 
-#define LOG_DIR "sensor_data_logs"
+#define LOG_DIR "/home/grey-ghost/Projects/ipmi_dev_copy/sensor_data_logs/server-omp-data"
 #define LOG_BUFFER_SIZE (1024 * 1024)
 #define IPC_SOCKET_PATH "/tmp/ipmi_cluster_monitor.sock"
 #define SAMPLE_RING_CAPACITY 4096
@@ -500,8 +500,7 @@ static int sample_ring_pop(sample_ring *ring, struct timespec *ts, double *readi
 
     size_t slot = ring->tail;
     *ts = ring->timestamps[slot];
-    memcpy(readings, &ring->readings[slot * ring->sensor_count],
-           ring->sensor_count * sizeof(*readings));
+    memcpy(readings, &ring->readings[slot * ring->sensor_count], ring->sensor_count * sizeof(*readings));
 
     ring->tail = (ring->tail + 1) % ring->capacity;
     ring->count--;
